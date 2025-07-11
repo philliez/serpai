@@ -1,0 +1,34 @@
+services:
+  # Web Service Definition
+  - type: web
+    name: trade-analysis-api
+    env: python
+    plan: starter # Use starter-plus if you encounter memory issues
+    region: oregon # Choose a region close to you, e.g., ohio, oregon, frankfurt
+    branch: main # Or the default branch of your repository
+
+    # Commands executed during the build process
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      # Installs Playwright browsers and their necessary system dependencies
+      playwright install --with-deps
+
+    # Command to start the application using a production-grade server
+    startCommand: "gunicorn --workers 3 --threads 2 --timeout 120 --bind 0.0.0.0:$PORT api:app"
+
+    # Environment variables for the service
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11 # Specify a recent Python version
+      - key: DATA_DIR
+        value: /var/data/presets # Mount path for persistent data
+
+    # Health check to ensure the service is running
+    healthCheckPath: /presets
+
+    # Definition for the persistent disk
+    disks:
+      - name: presets-data
+        mountPath: /var/data/presets # Must match the DATA_DIR envVar
+        sizeGB: 1 # 1 GB is the smallest size and is sufficient

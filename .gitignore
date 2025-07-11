@@ -1,1 +1,21 @@
-.venv
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+.venv/
+env/
+.env
+
+# Local data files
+presets.json
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.swp
+*.swo
+
