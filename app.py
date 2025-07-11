@@ -1,162 +1,124 @@
 import pandas as pd
+import numpy as np
 from flask import Flask, request, jsonify
 import io
 
 app = Flask(__name__)
 
-# Stop Loss and Take Profit percentages - moved from Scoring.py
-STOP_LOSS_PERCENTAGES = [0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.15, 0.2, 0.25]
-TAKE_PROFIT_PERCENTAGES = [0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 1]
+# --- Helper functions from your second script ---
 
-# Helper functions - moved from Scoring.py
-def get_histo_color(current_value, previous_value, macd):
-    """Determines the color of the MACD histogram based on current and previous values."""
-    macd_positive = macd > 0
+def exit_price(row, df, tp, sl):
+    """
+    Calculates the exit price and result of a trade based on TP/SL levels.
+    """
+    entry_price = row['open']
+    entry_time = row['time']
+    tp_price = entry_price * tp
+    sl_price = entry_price * sl
+
+    # Get the index of the current entry row to slice the DataFrame for future prices
+    idx = df.index.get_loc(row.name)
+    future_df = df.iloc[idx+1:]
+
+    for i, next_row in future_df.iterrows():
+        if next_row['high'] >= tp_price:
+            return pd.Series({
+                'Open_price': entry_price,
+                'TP_price': tp_price,
+                'Exit_price': tp_price,
+                'W/L': "WIN",
+                'open_datetime': entry_time,
+                'end_datetime': next_row['time']
+            })
+        if next_row['low'] <= sl_price:
+            return pd.Series({
+                'Open_price': entry_price,
+                'SL_price': sl_price,
+                'Exit_price': sl_price,
+                'W/L': "LOSS",
+                'open_datetime': entry_time,
+                'end_datetime': next_row['time']
+            })
+
+    # If neither TP nor SL is hit by the end of the data
+    return pd.Series({
+        'Open_price': entry_price,
+        'W/L': "OPEN",
+        'open_datetime': entry_time,
+        'end_datetime': None,
+        'Exit_price': None
+    })
+
+def process_trade_analysis(file_object, tp, sl):
+    """
+    Processes the uploaded CSV to perform trade analysis.
+    """
     try:
-        current_value = float(current_value)
-        previous_value = float(previous_value) if previous_value is not None else float('-inf')
-    except (ValueError, TypeError):
-        return ""
-
-    if current_value > previous_value:
-        return "Dark Green" if macd_positive else "Red"
-    elif current_value < previous_value:
-        return "Light Green" if macd_positive else "Pink"
-    else:
-        return ""
-
-def calculate_score(color, macd_pos_neg):
-    """Calculates a score based on the histogram color and MACD direction."""
-    if color == "Pink" and macd_pos_neg == "Negative": return 10
-    elif color == "Light Green" and macd_pos_neg == "Negative": return 20
-    elif color == "Dark Green" and macd_pos_neg == "Negative": return 30
-    elif color == "Dark Green" and macd_pos_neg == "Positive": return 40
-    elif color == "Light Green" and macd_pos_neg == "Positive": return 30
-    elif color == "Pink" and macd_pos_neg == "Positive": return 0
-    elif color == "Red" and macd_pos_neg == "Positive": return -10
-    elif color == "Red" and macd_pos_neg == "Negative": return -20
-    else: return 0
-
-def calculate_max_profit(price_series, entry_price, stop_loss_levels, take_profit_levels):
-    """Calculates the maximum profit based on stop loss and take profit levels."""
-    stop_loss_hit = {sl: False for sl in stop_loss_levels}
-    take_profit_hit = {tp: False for tp in take_profit_levels}
-    exit_price = None
-    exit_reason = None
-    highest_gain_before_exit = 0
-
-    for price in price_series:
-        percent_change = ((price - entry_price) / entry_price)
-        highest_gain_before_exit = max(highest_gain_before_exit, percent_change)
-
-        for sl in stop_loss_levels:
-            if not stop_loss_hit[sl] and percent_change <= -sl:
-                stop_loss_hit[sl] = True
-                exit_price = price
-                exit_reason = f'Stop Loss ({sl*100:.1f}%)'
-                break
-
-        for tp in take_profit_levels:
-            if not take_profit_hit[tp] and percent_change >= tp:
-                take_profit_hit[tp] = True
-                exit_price = price
-                exit_reason = f'Take Profit ({tp*100:.1f}%)'
-                break
-
-        if exit_price is not None:
-            break
-
-    results = {
-        'Entry Price': entry_price,
-        'Exit Price': exit_price,
-        'Exit Reason': exit_reason,
-        'Highest Gain Before Exit': highest_gain_before_exit * 100,
-    }
-    for sl in stop_loss_levels:
-        results[f'Stop Loss Hit ({sl*100:.1f}%)'] = str(stop_loss_hit[sl])
-
-    for tp in take_profit_levels:
-        results[f'Take Profit Hit ({tp*100:.1f}%)'] = str(take_profit_hit[tp])
-
-    return results
-
-def process_data_for_api(file_object):
-    """Processes data from CSV, calculates scores, and stop loss results for API."""
-    try:
+        # Load data and ensure correct data types
         df = pd.read_csv(file_object)
-        df['Timestamp'] = pd.to_datetime(df['time'], format='%Y-%m-%dT%H:%M:%SZ', errors='coerce', utc=True)
-        df.dropna(subset=['Timestamp'], inplace=True)
-        df = df.rename(columns={'Histogram': 'Histo', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
+        df['time'] = pd.to_datetime(df['time']) # Assuming 'time' column exists
+        df = df.sort_values('time').reset_index(drop=True)
 
-        # Added fix for timezone-aware to timezone-naive conversion
-        df['Timestamp'] = df['Timestamp'].dt.tz_localize(None)
+        # Apply the analysis function
+        analysis_results = df.apply(exit_price, axis=1, df=df, tp=tp, sl=sl)
 
-        df['Histo Color'] = ""
-        df['Histo +/-'] = ""
-        df['Histo Value'] = 0.0
-        df['Score'] = 0
+        # Combine original data with analysis
+        results_df = pd.concat([df, analysis_results], axis=1)
 
-        for index, row in df.iterrows():
-            try:
-                previous_histo = df[df['Timestamp'] < row['Timestamp']]['Histo'].iloc[-1]
-            except IndexError:
-                previous_histo = None
-            macd_value = float(row['MACD'])
-            histo_color = get_histo_color(row['Histo'], previous_histo, macd_value)
-            macd_pos_neg = "Positive" if macd_value >= 0 else "Negative"
-            score = calculate_score(histo_color, macd_pos_neg)
+        # Calculate summary
+        win_count = (results_df['W/L'] == "WIN").sum()
+        loss_count = (results_df['W/L'] == "LOSS").sum()
 
-            df.loc[index, ['Histo Color', 'Histo +/-']] = histo_color, macd_pos_neg
-            df.loc[index, 'Histo Value'] = float(row['Histo']) if row['Histo'] is not None else 0.0
-            df.loc[index, 'Score'] = int(score)
+        # Convert datetime objects to strings for JSON compatibility
+        results_df['open_datetime'] = results_df['open_datetime'].astype(str)
+        results_df['end_datetime'] = results_df['end_datetime'].astype(str)
+        results_df.replace({pd.NaT: None}, inplace=True)
 
-        results_list = []
-        for index, row in df.iterrows():
-            entry_price = row['Open']
-            price_series = df[df['Timestamp'] >= row['Timestamp']]['Close'].tolist()
-            stop_loss_results = calculate_max_profit(price_series, entry_price, STOP_LOSS_PERCENTAGES, TAKE_PROFIT_PERCENTAGES)
-            row_results = row.to_dict()
-            row_results.update(stop_loss_results)
-            results_list.append(row_results)
-
-        results_df = pd.DataFrame(results_list)
-
-        # Prepare candlestick data for lightweight-charts
-        candlestick_data = df[['Timestamp', 'Open', 'High', 'Low', 'Close']].rename(
-            columns={'Timestamp': 'time', 'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close'}
-        )
-        # Convert datetime to timestamp for the chart (Lightweight Charts expects Unix timestamps in seconds or milliseconds)
-        candlestick_data['time'] = candlestick_data['time'].astype('int64') // 10**9 # Unix timestamp in seconds
-
-        # Prepare score data for lightweight-charts
-        score_data = df[['Timestamp', 'Score']].rename(columns={'Timestamp': 'time', 'Score': 'value'})
-        score_data['time'] = score_data['time'].astype('int64') // 10**9 # Unix timestamp in seconds
 
         return {
-            "processed_data": results_df.to_dict(orient='records'),
-            "chart_data": {
-                "candlestick": candlestick_data.to_dict(orient='records'),
-                "score_line": score_data.to_dict(orient='records')
-            }
+            "summary": {
+                "win_count": int(win_count),
+                "loss_count": int(loss_count),
+                "win_rate": (win_count / (win_count + loss_count)) if (win_count + loss_count) > 0 else 0,
+                "take_profit_multiplier": tp,
+                "stop_loss_multiplier": sl
+            },
+            "trades": results_df.to_dict(orient='records')
         }
 
     except Exception as e:
+        # Return a specific error message
         raise Exception(f"Error processing data: {e}")
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
+
+# --- API Endpoint ---
+
+@app.route('/analyze_trades', methods=['POST'])
+def analyze_trades_endpoint():
+    # Check for file
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
     file = request.files['file']
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
-    if file:
-        try:
-            # Read the file directly into pandas
-            data = process_data_for_api(io.StringIO(file.read().decode('utf-8')))
-            return jsonify({"message": "File processed successfully", "data": data}), 200
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+
+    try:
+        # Get TP/SL from form, with default values if not provided
+        tp = float(request.form.get('tp', 1.006))
+        sl = float(request.form.get('sl', 0.9994))
+
+        # Process the file
+        string_io = io.StringIO(file.read().decode('utf-8'))
+        analysis_data = process_trade_analysis(string_io, tp=tp, sl=sl)
+
+        return jsonify({
+            "message": "Analysis successful",
+            "data": analysis_data
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Running on port 5555 as in the original request
+    app.run(host='localhost', port=5555, debug=True)
